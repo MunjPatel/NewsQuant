@@ -42,6 +42,7 @@ st.markdown("""
 
 st.title("📰 NewsQuant: Event-Driven Sentiment Engine")
 
+# 2. COMPREHENSIVE TICKER LIST
 TICKER_UNIVERSE = {
     "Mega Cap Tech": {"NVIDIA": "NVDA", "Apple": "AAPL", "Microsoft": "MSFT", "Amazon": "AMZN", "Google": "GOOGL", "Meta": "META", "Tesla": "TSLA", "AMD": "AMD"},
     "Semiconductors": {"Broadcom": "AVGO", "Intel": "INTC", "Qualcomm": "QCOM", "Micron": "MU", "TSMC": "TSM", "Super Micro": "SMCI", "Arm Holdings": "ARM"},
@@ -79,13 +80,13 @@ selected_labels = st.sidebar.multiselect(
 def get_market_data(ticker_symbol):
     """Fetches Price History using yf.download (More Robust)"""
     try:
-        # yf.download is often more reliable than Ticker.history for single columns
         df = yf.download(ticker_symbol, period="1mo", interval="1d", progress=False)
-        
         # Handle Multi-Index columns if they appear
         if isinstance(df.columns, pd.MultiIndex):
-            df = df.xs(ticker_symbol, axis=1, level=1)
-            
+            try:
+                df = df.xs(ticker_symbol, axis=1, level=1)
+            except KeyError:
+                pass # Sometimes level is different or structure varies
         return df
     except Exception as e:
         st.error(f"Price Data Error ({ticker_symbol}): {e}")
@@ -94,10 +95,8 @@ def get_market_data(ticker_symbol):
 def get_news_ddg(ticker_symbol):
     """Fetches News using DuckDuckGo"""
     try:
-        # Removing 'USD' for crypto search helps DDG accuracy
         search_term = ticker_symbol.replace("-USD", "")
         results = DDGS().news(keywords=f"{search_term} stock news", max_results=8)
-        
         formatted_news = []
         for item in results:
             formatted_news.append({
@@ -113,11 +112,6 @@ def get_news_ddg(ticker_symbol):
 
 # 5. AI FUNCTIONS
 def analyze_sentiment_and_summary(ticker, news_items, api_key):
-    """
-    Performs two tasks in one API call to save time:
-    1. Classify Sentiment of each headline.
-    2. Write a summary inference.
-    """
     if not news_items or not api_key:
         return [], "No data for analysis."
     
@@ -131,8 +125,8 @@ def analyze_sentiment_and_summary(ticker, news_items, api_key):
     {headlines_block}
     
     Perform two tasks:
-    1. Classify each headline as POSITIVE, NEGATIVE, or NEUTRAL. Return as a JSON list string (e.g., ["POSITIVE", "NEUTRAL"]).
-    2. Write a brief "Market Pulse" inference (max 50 words). Why is the stock moving based on these headlines?
+    1. Classify each headline as POSITIVE, NEGATIVE, or NEUTRAL. Return as a JSON list string.
+    2. Write a brief "Market Pulse" inference (max 50 words). Why is the stock moving?
     
     Format output exactly like this:
     SENTIMENT_LIST: ["POSITIVE", "NEGATIVE", ...]
@@ -147,13 +141,10 @@ def analyze_sentiment_and_summary(ticker, news_items, api_key):
         )
         content = completion.choices[0].message.content
         
-        # Manual Parsing for Robustness
         sentiments = []
         summary = "Analysis failed."
-        
         import ast
         
-        # Extract List
         if "SENTIMENT_LIST:" in content:
             list_part = content.split("SENTIMENT_LIST:")[1].split("SUMMARY:")[0].strip()
             try:
@@ -161,7 +152,6 @@ def analyze_sentiment_and_summary(ticker, news_items, api_key):
             except:
                 sentiments = ["NEUTRAL"] * len(news_items)
         
-        # Extract Summary
         if "SUMMARY:" in content:
             summary = content.split("SUMMARY:")[1].strip()
             
@@ -174,7 +164,6 @@ def analyze_sentiment_and_summary(ticker, news_items, api_key):
 if not selected_labels:
     st.info("👈 Please select at least one asset from the sidebar.")
 else:
-    # Create Tabs for each selected ticker
     tabs = st.tabs([label.split(" (")[0] for label in selected_labels])
     
     for i, label in enumerate(selected_labels):
@@ -189,13 +178,11 @@ else:
                 with st.spinner("Fetching Chart..."):
                     price_df = get_market_data(ticker)
             with col2:
-                # News is fast, no spinner needed usually
                 news_list = get_news_ddg(ticker)
             
-            # 2. Run AI Analysis (If Key Present)
+            # 2. Run AI Analysis
             sentiments = []
             summary = ""
-            
             if api_key and news_list:
                 with st.spinner("🤖 AI Reading News..."):
                     sentiments, summary = analyze_sentiment_and_summary(ticker, news_list, api_key)
@@ -229,8 +216,11 @@ else:
             # B. Price Chart
             if not price_df.empty:
                 fig = go.Figure()
+                # Determine correct column name (Close or Adj Close)
+                y_col = 'Close' if 'Close' in price_df.columns else price_df.columns[0]
+                
                 fig.add_trace(go.Scatter(
-                    x=price_df.index, y=price_df['Close'],
+                    x=price_df.index, y=price_df[y_col],
                     mode='lines', name='Price',
                     line=dict(color='#60a5fa', width=2),
                     fill='tozeroy',
@@ -245,7 +235,8 @@ else:
                     yaxis=dict(gridcolor='#374151', title=None),
                     title=f"{ticker} - 1 Month Trend"
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                # FIX: Added unique key here
+                st.plotly_chart(fig, width='stretch', key=f"price_chart_{ticker}_{i}")
             else:
                 st.error("Could not load price data. Ticker might be delisted or API limit reached.")
 
@@ -278,7 +269,8 @@ else:
                         xaxis=dict(showgrid=False, visible=False),
                         yaxis=dict(showgrid=False)
                     )
-                    st.plotly_chart(fig_bar, use_container_width=True)
+                    # FIX: Added unique key here
+                    st.plotly_chart(fig_bar, width='stretch', key=f"sentiment_bar_{ticker}_{i}")
 
             # D. News Feed
             st.markdown("#### 🗞️ Latest Headlines")
@@ -290,7 +282,6 @@ else:
                 elif item['sentiment'] == "NEGATIVE":
                     css = "negative"; emoji = "🔴"
                 
-                # Parse Date
                 try:
                     d = datetime.fromisoformat(item['time'].replace('Z', '+00:00'))
                     date_display = d.strftime("%b %d, %H:%M")
