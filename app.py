@@ -18,9 +18,16 @@ st.markdown("""
         border-radius: 8px;
         margin-bottom: 10px;
         border-left: 4px solid #6b7280;
+        transition: transform 0.1s;
+    }
+    .news-card:hover {
+        transform: scale(1.01);
     }
     .positive { border-left-color: #22c55e; }
     .negative { border-left-color: #ef4444; }
+    
+    a { color: #60a5fa; text-decoration: none; }
+    a:hover { text-decoration: underline; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -30,34 +37,50 @@ st.markdown("### Visualize the impact of News Headlines on Price Action")
 # 2. SIDEBAR & INPUTS
 st.sidebar.header("Configuration")
 ticker = st.sidebar.text_input("Ticker Symbol", "TSLA").upper()
+
+# API Key Logic
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
     api_key = st.sidebar.text_input("Groq API Key", type="password")
 
-# 3. DATA FUNCTIONS
-@st.cache_data(ttl=3600) # Cache for 1 hour to save API calls
+# 3. DATA FUNCTIONS (FIXED)
+@st.cache_data(ttl=3600)
 def get_news_and_data(ticker_symbol):
-    stock = yf.Ticker(ticker_symbol)
-    
-    # 1. Get Historical Price (1 Month for context)
-    hist = stock.history(period="1mo", interval="1d")
-    
-    # 2. Get News
-    raw_news = stock.news
-    
-    news_data = []
-    for item in raw_news:
-        # Convert unix timestamp to datetime
-        pub_time = datetime.fromtimestamp(item['providerPublishTime'])
-        news_data.append({
-            "title": item['title'],
-            "link": item['link'],
-            "publisher": item['publisher'],
-            "time": pub_time,
-            "timestamp": item['providerPublishTime']
-        })
+    try:
+        stock = yf.Ticker(ticker_symbol)
         
-    return hist, news_data
+        # 1. Get Historical Price (1 Month for context)
+        hist = stock.history(period="1mo", interval="1d")
+        
+        # 2. Get News (With Error Handling)
+        raw_news = stock.news
+        
+        news_data = []
+        for item in raw_news:
+            try:
+                # FIX: Use .get() to avoid KeyError if field is missing
+                timestamp = item.get('providerPublishTime')
+                
+                if timestamp:
+                    pub_time = datetime.fromtimestamp(timestamp)
+                else:
+                    # Fallback if no time provided
+                    pub_time = datetime.now()
+
+                news_data.append({
+                    "title": item.get('title', 'No Title Available'),
+                    "link": item.get('link', '#'),
+                    "publisher": item.get('publisher', 'Unknown Source'),
+                    "time": pub_time,
+                    "timestamp": timestamp
+                })
+            except Exception:
+                continue # Skip malformed items
+            
+        return hist, news_data
+    except Exception as e:
+        st.error(f"Error fetching data from Yahoo Finance: {e}")
+        return pd.DataFrame(), []
 
 # 4. AI SENTIMENT ANALYST
 def analyze_sentiment_batch(news_items, api_key):
@@ -78,7 +101,7 @@ def analyze_sentiment_batch(news_items, api_key):
     Task:
     Classify each headline as POSITIVE, NEGATIVE, or NEUTRAL.
     Return ONLY a JSON array of strings, e.g., ["POSITIVE", "NEUTRAL", "NEGATIVE"].
-    Do not explain. Strictly match the order.
+    Do not explain. Strictly match the order and count.
     """
     
     try:
@@ -89,37 +112,45 @@ def analyze_sentiment_batch(news_items, api_key):
         )
         # Parsing the fake-JSON output
         content = completion.choices[0].message.content
-        # Simple cleanup to ensure list format
+        
         import ast
-        # Find the list bracket in the response
+        # Find the list bracket in the response to handle any chatty intro
         start = content.find('[')
-        end = content.find(']') + 1
+        end = content.rfind(']') + 1
         if start != -1 and end != -1:
             sentiment_list = ast.literal_eval(content[start:end])
             return sentiment_list
         else:
-            return ["NEUTRAL"] * len(news_items) # Fallback
+            return ["NEUTRAL"] * len(news_items) 
             
     except Exception as e:
         st.error(f"Sentiment Analysis Failed: {e}")
         return ["NEUTRAL"] * len(news_items)
 
 # 5. MAIN EXECUTION
-if ticker and api_key:
+if ticker:
+    if not api_key:
+        st.warning("⚠️ Please enter your Groq API Key in the sidebar to enable AI Sentiment Analysis.")
+        
     with st.spinner(f"Fetching market data and news for {ticker}..."):
         price_df, news_list = get_news_and_data(ticker)
     
     if not news_list:
-        st.warning("No recent news found for this asset.")
+        st.info("No recent news found for this asset. Try a major ticker like AAPL, TSLA, or NVDA.")
     else:
-        # Run AI Analysis if button clicked or auto
-        with st.spinner("🤖 AI is reading the headlines..."):
-            sentiments = analyze_sentiment_batch(news_list, api_key)
+        # Run AI Analysis ONLY if API Key exists
+        if api_key:
+            with st.spinner("🤖 AI is reading the headlines..."):
+                sentiments = analyze_sentiment_batch(news_list, api_key)
+        else:
+            # Fallback if no key
+            sentiments = ["NEUTRAL"] * len(news_list)
         
         # Merge Sentiment into Data
         processed_news = []
         sentiment_score = 0 # Net Score
         
+        # Safety check for list length mismatch
         for i, item in enumerate(news_list):
             sent = sentiments[i] if i < len(sentiments) else "NEUTRAL"
             item['sentiment'] = sent
@@ -130,27 +161,25 @@ if ticker and api_key:
 
         # --- VISUALIZATION LAYER ---
         
-        # 1. Price Chart with News Markers
+        # 1. Price Chart
         fig = go.Figure()
         
         # Price Line
-        fig.add_trace(go.Scatter(
-            x=price_df.index, y=price_df['Close'],
-            mode='lines', name='Price',
-            line=dict(color='#3b82f6', width=2)
-        ))
-        
-        # News Markers (We map news time to the closest price time approx)
-        # Note: Exact mapping requires aligning timestamps, for visual simplicity we just list them below
-        # But advanced candidates map dots. Let's do a simpler "News Feed" below the chart to save complexity.
+        if not price_df.empty:
+            fig.add_trace(go.Scatter(
+                x=price_df.index, y=price_df['Close'],
+                mode='lines', name='Price',
+                line=dict(color='#3b82f6', width=2)
+            ))
         
         fig.update_layout(
             title=f"{ticker} Price Action (1 Month)",
             height=350,
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
-            yaxis=dict(gridcolor='#374151'),
-            xaxis=dict(showgrid=False)
+            yaxis=dict(gridcolor='#374151', title="Price ($)"),
+            xaxis=dict(showgrid=False),
+            margin=dict(l=10, r=10, t=30, b=10)
         )
         st.plotly_chart(fig, use_container_width=True)
 
@@ -172,19 +201,24 @@ if ticker and api_key:
             counts = pd.Series(sentiments).value_counts()
             color_map = {"POSITIVE": "#22c55e", "NEGATIVE": "#ef4444", "NEUTRAL": "#9ca3af"}
             
-            fig_bar = go.Figure([go.Bar(
-                x=counts.index, 
-                y=counts.values,
-                marker_color=[color_map.get(x, "#9ca3af") for x in counts.index]
-            )])
-            fig_bar.update_layout(
-                height=100, 
-                margin=dict(l=0, r=0, t=0, b=0),
-                paper_bgcolor='rgba(0,0,0,0)', 
-                plot_bgcolor='rgba(0,0,0,0)',
-                showlegend=False
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
+            if not counts.empty:
+                fig_bar = go.Figure([go.Bar(
+                    x=counts.index, 
+                    y=counts.values,
+                    marker_color=[color_map.get(x, "#9ca3af") for x in counts.index],
+                    text=counts.values,
+                    textposition='auto'
+                )])
+                fig_bar.update_layout(
+                    height=120, 
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    paper_bgcolor='rgba(0,0,0,0)', 
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    showlegend=False,
+                    yaxis=dict(showgrid=False, showticklabels=False),
+                    xaxis=dict(showgrid=False)
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
 
         # 3. The News Feed (Rich UI)
         st.markdown("### 🗞️ Analyzed News Feed")
@@ -208,9 +242,9 @@ if ticker and api_key:
                     <small style="color:#9ca3af">{item['publisher']} • {time_str}</small>
                     <b style="color:{'#4ade80' if css_class=='positive' else '#f87171' if css_class=='negative' else '#9ca3af'}">{item['sentiment']}</b>
                 </div>
-                <h4 style="margin: 5px 0;">{emoji} <a href="{item['link']}" target="_blank" style="text-decoration:none; color:#f3f4f6;">{item['title']}</a></h4>
+                <h4 style="margin: 5px 0; font-size: 1.1em;">{emoji} <a href="{item['link']}" target="_blank" style="text-decoration:none; color:#f3f4f6;">{item['title']}</a></h4>
             </div>
             """, unsafe_allow_html=True)
 
 else:
-    st.info("Enter a ticker and API key to scan the news.")
+    st.info("Enter a ticker in the sidebar to start the News Engine.")
