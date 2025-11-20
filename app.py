@@ -105,6 +105,11 @@ def get_news_ddg(ticker_symbol):
                 "publisher": item.get('source', 'Unknown'),
                 "time": item.get('date', datetime.now().isoformat())
             })
+        
+        # --- FIX: SORT NEWS BY TIME (DESCENDING/NEWEST FIRST) ---
+        # ISO strings sort correctly lexicographically
+        formatted_news.sort(key=lambda x: x['time'], reverse=True)
+        
         return formatted_news
     except Exception as e:
         st.warning(f"News fetch warning: {e}")
