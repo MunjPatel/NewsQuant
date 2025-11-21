@@ -2,9 +2,7 @@
 
 An NLP pipeline that quantifies the impact of breaking news on asset prices using DuckDuckGo Search and LLM Inference.
 
-🎥 Live Demo
-
-<!-- [Upload a 30s Loom/YouTube video showing the news feed and sentiment score] -->
+![App Preview](news_quant.gif)
 
 🚀 Context
 
